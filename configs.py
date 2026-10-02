@@ -52,6 +52,7 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--dataset_dir', type=str, required=True)
     parser.add_argument('--semantic_dataset', type=str, required=True)
     parser.add_argument('--splits_file', type=str, required=True)
+    # parser.add_argument('--baseline', type=str, required=True)
     parser.add_argument('--input_size', type=int, default=1024)
     parser.add_argument('--semantic_size', type=int, default=768)
     parser.add_argument('--hidden_size', type=int, default=512)
@@ -66,8 +67,8 @@ def get_config(parse=True, **optional_kwargs):
     # Loss Weights
     parser.add_argument('--lambda_recon', type=float, default=1.0)
     parser.add_argument('--lambda_sparse', type=float, default=5.0)
-    parser.add_argument('--lambda_div', type=float, default=0.5)
-    parser.add_argument('--lambda_smooth', type=float, default=0.1)
+    parser.add_argument('--lambda_div', type=float, default=0.1)
+    parser.add_argument('--lambda_smooth', type=float, default=0.05)
 
     # Training & Warmup
     parser.add_argument('--warmup_epochs', type=int, default=5)
@@ -75,6 +76,8 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-5)
     parser.add_argument('--clip', type=float, default=5.0)
+    parser.add_argument('--lr_scorer', type=float, default=1e-3)
+    
 
     if parse:
         kwargs = parser.parse_args()

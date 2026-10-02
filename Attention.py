@@ -81,6 +81,10 @@ class BiMambaSSM(nn.Module):
 
         self.dt_proj_fw = nn.Linear(self.d_inner, self.d_inner, bias=True)
         self.dt_proj_bw = nn.Linear(self.d_inner, self.d_inner, bias=True)
+        for dt_proj in (self.dt_proj_fw, self.dt_proj_bw):
+            dt = torch.exp(torch.rand(self.d_inner) * (math.log(0.1) - math.log(0.001)) + math.log(0.001))
+            with torch.no_grad():
+                dt_proj.bias.copy_(dt + torch.log(-torch.expm1(-dt)))   # inverse softplus
 
         # Continuous state matrix A initialization (S4D structured initialization)
         A = torch.arange(1, d_state + 1, dtype=torch.float32).repeat(self.d_inner, 1)
@@ -88,6 +92,7 @@ class BiMambaSSM(nn.Module):
         self.D = nn.Parameter(torch.ones(self.d_inner))
 
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+
 
     def _ssm_recurrence(self, x, x_proj, dt_proj):
         """Executes ZOH discretization and SSM recurrence along sequence length."""
@@ -162,214 +167,44 @@ class BiMambaSSM(nn.Module):
 
 
 class DualParameterInterceptorScorer(nn.Module):
-    """
-    Learns frame importance from:
-        1. Forward + backward SSM step sizes (Delta)
-        2. Forward + backward hidden-state changes
-
-    The two signals are learned separately and then fused.
-    """
-
-    def __init__(self, d_inner=1024, d_state=16):
+    def __init__(self, d_inner=1024, d_state=16, summary_rate=0.15):
         super().__init__()
-
-        # ---------------------------------------------------------
-        # 1. Learned Delta representation
-        #
-        # Input:
-        #   delta_fw: [B, T, 1024]
-        #   delta_bw: [B, T, 1024]
-        #
-        # Concatenated:
-        #   [B, T, 2048]
-        #
-        # Output:
-        #   [B, T, 1]
-        # ---------------------------------------------------------
         self.delta_encoder = nn.Sequential(
-            nn.Linear(d_inner * 2, 128),
-            nn.SiLU(),
-            nn.Linear(128, 1)
-        )
-
-        # ---------------------------------------------------------
-        # 2. State-change representation
-        #
-        # Input:
-        #   forward state change magnitude
-        #   backward state change magnitude
-        #
-        # [B, T, 2] -> [B, T, 1]
-        # ---------------------------------------------------------
+            nn.Linear(d_inner * 2, 128), nn.SiLU(), nn.Linear(128, 1))
         self.state_encoder = nn.Sequential(
-            nn.Linear(2, 16),
-            nn.SiLU(),
-            nn.Linear(16, 1)
-        )
-
-        # ---------------------------------------------------------
-        # 3. Learn how Delta importance and state-change importance
-        #    should be combined.
-        #
-        # [B, T, 2] -> [B, T, 1]
-        # ---------------------------------------------------------
+            nn.Linear(2, 16), nn.SiLU(), nn.Linear(16, 1))
         self.fusion = nn.Sequential(
-            nn.Linear(2, 16),
-            nn.SiLU(),
-            nn.Linear(16, 1)
-        )
+            nn.Linear(2, 16), nn.SiLU(), nn.Linear(16, 1))
+        self.scale = nn.Parameter(torch.tensor(2.0))
+        self.bias = nn.Parameter(torch.tensor(math.log(summary_rate / (1 - summary_rate))))
 
-    def forward(
-        self,
-        delta_fw,
-        delta_bw,
-        h_fw,
-        h_bw
-    ):
-        """
-        Parameters
-        ----------
-        delta_fw : [B, T, D_inner]
-        delta_bw : [B, T, D_inner]
+    @staticmethod
+    def _zscore(x):                       # x: [B, T, 1], normalize over time
+        return (x - x.mean(1, keepdim=True)) / (x.std(1, keepdim=True, unbiased=False) + 1e-6)
 
-        h_fw : [B, T, D_inner, N]
-        h_bw : [B, T, D_inner, N]
+    @staticmethod
+    def _state_norm(h):                   # h: [B, T, D, N] -> [B, T]
+        dh = h[:, 1:] - h[:, :-1]
+        dh = torch.cat([dh[:, :1], dh], dim=1)
+        return torch.norm(dh, dim=(-2, -1))
 
-        Returns
-        -------
-        scores       : [B, T, 1]
-        delta_score  : [B, T, 1]
-        state_score  : [B, T, 1]
-        delta_t      : [B, T, 1]
-        d_t          : [B, T, 1]
-        """
+    def forward(self, delta_fw, delta_bw, h_fw, h_bw):
+        # Delta branch
+        delta_t = self.delta_encoder(torch.cat([delta_fw, delta_bw], dim=-1))   # [B,T,1]
+        delta_hat = self._zscore(delta_t)
+        delta_score = torch.sigmoid(delta_hat)                                   # diagnostics
 
-        # =========================================================
-        # 1. LEARNED DELTA REPRESENTATION
-        # =========================================================
+        # State-change branch (log + z-score so it can't saturate)
+        norm_fw, norm_bw = self._state_norm(h_fw), self._state_norm(h_bw)
+        d_t = 0.5 * (norm_fw + norm_bw).unsqueeze(-1)
+        s = torch.log1p(torch.stack([norm_fw, norm_bw], dim=-1))                 # [B,T,2]
+        s = (s - s.mean(1, keepdim=True)) / (s.std(1, keepdim=True, unbiased=False) + 1e-6)
+        state_hat = self.state_encoder(s)                                        # [B,T,1]
+        state_hat = self._zscore(state_hat)
+        state_score = torch.sigmoid(state_hat)                                   # diagnostics
 
-        # Instead of averaging 1024 forward + 1024 backward
-        # channels, preserve all Delta information.
-        delta_features = torch.cat(
-            [delta_fw, delta_bw],
-            dim=-1
-        )
-        # [B, T, 2048]
-
-        delta_t = self.delta_encoder(
-            delta_features
-        )
-        # [B, T, 1]
-
-        # Normalize Delta importance across the temporal dimension.
-        mean_delta = delta_t.mean(
-            dim=1,
-            keepdim=True
-        )
-
-        std_delta = delta_t.std(
-            dim=1,
-            keepdim=True
-        ) + 1e-6
-
-        delta_hat = (
-            delta_t - mean_delta
-        ) / std_delta
-
-        delta_score = torch.sigmoid(
-            delta_hat
-        )
-        # [B, T, 1]
-
-        # =========================================================
-        # 2. HIDDEN STATE CHANGE
-        # =========================================================
-
-        # Forward hidden-state difference
-        dh_fw = (
-            h_fw[:, 1:] -
-            h_fw[:, :-1]
-        )
-
-        # Pad first timestep
-        dh_fw = torch.cat(
-            [dh_fw[:, :1], dh_fw],
-            dim=1
-        )
-
-        # Backward hidden-state difference
-        dh_bw = (
-            h_bw[:, 1:] -
-            h_bw[:, :-1]
-        )
-
-        # Pad first timestep
-        dh_bw = torch.cat(
-            [dh_bw[:, :1], dh_bw],
-            dim=1
-        )
-
-        # Magnitude of forward state transition
-        norm_fw = torch.norm(
-            dh_fw,
-            dim=(-2, -1)
-        )
-        # [B, T]
-
-        # Magnitude of backward state transition
-        norm_bw = torch.norm(
-            dh_bw,
-            dim=(-2, -1)
-        )
-        # [B, T]
-
-        # Keep this quantity for diagnostics
-        d_t = 0.5 * (
-            norm_fw + norm_bw
-        ).unsqueeze(-1)
-        # [B, T, 1]
-
-        # Build two-dimensional state feature
-        state_features = torch.stack(
-            [norm_fw, norm_bw],
-            dim=-1
-        )
-        # [B, T, 2]
-
-        state_raw = self.state_encoder(
-            state_features
-        )
-        # [B, T, 1]
-
-        state_score = torch.sigmoid(
-            state_raw
-        )
-        # [B, T, 1]
-
-        # =========================================================
-        # 3. LEARNED FUSION
-        # =========================================================
-
-        fusion_features = torch.cat(
-            [
-                delta_score,
-                state_score
-            ],
-            dim=-1
-        )
-        # [B, T, 2]
-
-        scores = torch.sigmoid(
-            self.fusion(
-                fusion_features
-            )
-        )
-        # [B, T, 1]
-
-        return (
-            scores,
-            delta_score,
-            state_score,
-            delta_t,
-            d_t
-        )
+        # Fuse the z-scored signals directly (no stacked sigmoids)
+        logit = self.fusion(torch.cat([delta_hat, state_hat], dim=-1))
+        z = self._zscore(logit)
+        scores = torch.sigmoid(self.scale * z + self.bias)                       # [B,T,1]
+        return scores, delta_score, state_score, delta_t, d_t
