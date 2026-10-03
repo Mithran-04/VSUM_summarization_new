@@ -23,10 +23,12 @@ class Summarizer(nn.Module):
         self.cross_modal_fusion = CrossModalFusion(hidden_size, dropout)
         self.mamba_encoder = BiMambaSSM(d_model=hidden_size, d_state=d_state)
         self.interceptor_scorer = DualParameterInterceptorScorer(
-            d_inner=hidden_size * 2, d_state=d_state, summary_rate=summary_rate)
+            d_inner=hidden_size * 2, d_state=d_state, summary_rate=summary_rate,  d_model=hidden_size)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, hidden_size))
         self.decoder = MambaStateSpaceDecoder(hidden_size, d_state,
                                               out_size=cnn_size + semantic_size)
+        # self.decoder = MambaStateSpaceDecoder(hidden_size, d_state,
+        #                                               out_size=cnn_size)
 
     def forward(self, cnn_features, semantic_features):
         if cnn_features.ndim == 2:
@@ -35,10 +37,11 @@ class Summarizer(nn.Module):
         cnn_proj = self.cnn_projection(cnn_features)
         sem_proj = self.semantic_projection(semantic_features)
         fused = self.cross_modal_fusion(cnn_proj, sem_proj)                      # [B,T,512]
+        # fused = cnn_proj
 
         temporal, d_fw, d_bw, h_fw, h_bw = self.mamba_encoder(fused)
         scores, delta_score, state_score, delta_t, d_t = self.interceptor_scorer(
-            d_fw, d_bw, h_fw, h_bw)
+            d_fw, d_bw, h_fw, h_bw, temporal)
 
         # Hard top-k with straight-through gradient
         B, T, _ = scores.shape
@@ -52,10 +55,13 @@ class Summarizer(nn.Module):
         recon = self.decoder(dec_in)                                             # [B,T,1792]
 
         # Fixed target: normalized raw inputs
+        # target = torch.cat([F.normalize(cnn_features, dim=-1),
+        #                     F.normalize(semantic_features, dim=-1)], dim=-1)
         target = torch.cat([F.normalize(cnn_features, dim=-1),
-                            F.normalize(semantic_features, dim=-1)], dim=-1)
+                                 F.normalize(semantic_features, dim=-1)
+                                 ],dim=-1)
 
         return {'scores': scores, 'delta_score': delta_score, 'state_score': state_score,
                 'delta_t': delta_t, 'd_t': d_t, 'fused_features': fused,
                 'temporal_features': temporal, 'selected_idx': idx,
-                'reconstructed_features': recon, 'target': target}
+                'reconstructed_features': recon, 'mask': mask, 'target': target}

@@ -105,6 +105,7 @@ def evaluate_dataset(
          h5py.File(semantic_h5_path, "r") as semantic_h5, \
          h5py.File(output_h5_path, "w") as result_h5:
 
+
         # Check if splits_file exists and parse test keys
         if splits_file and Path(splits_file).is_file():
             with open(splits_file, "r") as f:
@@ -161,6 +162,7 @@ def evaluate_dataset(
 
             with torch.no_grad():
                 output = model(cnn_tensor, semantic_tensor)
+                output = model(cnn_tensor, cnn_tensor)
                 scores = extract_model_scores(output)
                 scores = scores.detach().cpu().numpy().reshape(-1)
 

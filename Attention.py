@@ -167,12 +167,20 @@ class BiMambaSSM(nn.Module):
 
 
 class DualParameterInterceptorScorer(nn.Module):
-    def __init__(self, d_inner=1024, d_state=16, summary_rate=0.15):
+    def __init__(self, d_inner=1024, d_state=16, summary_rate=0.15, d_model=512):
         super().__init__()
         self.delta_encoder = nn.Sequential(
             nn.Linear(d_inner * 2, 128), nn.SiLU(), nn.Linear(128, 1))
         self.state_encoder = nn.Sequential(
             nn.Linear(2, 16), nn.SiLU(), nn.Linear(16, 1))
+
+         # Temporal-content branch (uses the encoder output `out`)
+        self.content_encoder = nn.Sequential(
+            nn.Linear(d_model, 128), nn.SiLU(), nn.Linear(128, 1))      # learned, per-frame
+        self.content_cue_encoder = nn.Sequential(
+            nn.Linear(2, 16), nn.SiLU(), nn.Linear(16, 1))    
+
+        
         self.fusion = nn.Sequential(
             nn.Linear(2, 16), nn.SiLU(), nn.Linear(16, 1))
         self.scale = nn.Parameter(torch.tensor(2.0))
@@ -188,7 +196,16 @@ class DualParameterInterceptorScorer(nn.Module):
         dh = torch.cat([dh[:, :1], dh], dim=1)
         return torch.norm(dh, dim=(-2, -1))
 
-    def forward(self, delta_fw, delta_bw, h_fw, h_bw):
+    @staticmethod
+    def _content_cues(o):                 # o: [B, T, D] -> [B, T, 2]
+        o = F.normalize(o, dim=-1)
+        glob = 1 - (o * F.normalize(o.mean(1, keepdim=True), dim=-1)).sum(-1)   # distance to video mean
+        loc = 1 - (o[:, 1:] * o[:, :-1]).sum(-1)                                # change vs previous frame
+        loc = torch.cat([loc[:, :1], loc], dim=1)
+        return torch.stack([glob, loc], dim=-1)
+
+
+    def forward(self, delta_fw, delta_bw, h_fw, h_bw, temporal):
         # Delta branch
         delta_t = self.delta_encoder(torch.cat([delta_fw, delta_bw], dim=-1))   # [B,T,1]
         delta_hat = self._zscore(delta_t)
@@ -201,10 +218,18 @@ class DualParameterInterceptorScorer(nn.Module):
         s = (s - s.mean(1, keepdim=True)) / (s.std(1, keepdim=True, unbiased=False) + 1e-6)
         state_hat = self.state_encoder(s)                                        # [B,T,1]
         state_hat = self._zscore(state_hat)
-        state_score = torch.sigmoid(state_hat)                                   # diagnostics
+        state_score = torch.sigmoid(state_hat)  
+        
+         # Temporal-content branch
+        cues = self._content_cues(temporal)                                      # [B,T,2]
+        cues = (cues - cues.mean(1, keepdim=True)) / (cues.std(1, keepdim=True, unbiased=False) + 1e-6)
+        content_hat = self._zscore(
+        self.content_encoder(temporal) + self.content_cue_encoder(cues))     # [B,T,1]
+        content_score = torch.sigmoid(content_hat)                               # diagnostics
+                                 # diagnostics
 
         # Fuse the z-scored signals directly (no stacked sigmoids)
-        logit = self.fusion(torch.cat([delta_hat, state_hat], dim=-1))
+        logit = self.fusion(torch.cat([delta_hat, state_hat, content_hat], dim=-1))
         z = self._zscore(logit)
         scores = torch.sigmoid(self.scale * z + self.bias)                       # [B,T,1]
         return scores, delta_score, state_score, delta_t, d_t

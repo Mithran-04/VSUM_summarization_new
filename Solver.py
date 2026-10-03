@@ -7,6 +7,12 @@ import torch.optim as optim
 from tqdm import tqdm, trange
 from Summarizer import Summarizer
 import torch.nn.functional as F
+import csv
+import re
+import subprocess
+import sys
+from pathlib import Path
+import h5py
 
 
 class Solver:
@@ -38,7 +44,7 @@ class Solver:
         )
         print('Trainable parameters:', total_parameters)
 
-    # Losses
+     # Losses
     def reconstruction_loss(self, target, recon):
         c = self.config.input_size
         l_cnn = 1 - F.cosine_similarity(recon[..., :c], target[..., :c], dim=-1).mean()
@@ -47,7 +53,8 @@ class Solver:
 
     def diversity_loss(self, feats, idx):
         # mean pairwise cosine similarity among selected frames (repulsive)
-        f = F.normalize(feats.detach(), dim=-1)
+        f = F.normalize(feats, dim=-1)
+        # f = F.normalize(feats.detach(), dim=-1)
         sel = torch.gather(f, 1, idx.unsqueeze(-1).expand(-1, -1, f.size(-1)))   # [B,k,D]
         k = sel.size(1)
         if k < 2:
@@ -61,22 +68,63 @@ class Solver:
             return torch.tensor(0.0, device=scores.device)
         return torch.mean((scores[:, 1:, :] - scores[:, :-1, :]) ** 2)
 
-    def total_loss(self, outputs, epoch_i):
+    def representativeness_loss(self, feats, idx):
+        """
+        Encourage the selected frames to represent
+        the overall video content.
+        """
+
+        feats = F.normalize(feats, dim=-1)
+
+        # Whole-video representation
+        video_repr = feats.mean(dim=1)
+
+        # Selected frame features
+        selected = torch.gather(
+            feats,
+            1,
+            idx.unsqueeze(-1).expand(
+                -1,
+                -1,
+                feats.size(-1)
+            )
+        )
+
+        # Summary representation
+        summary_repr = selected.mean(dim=1)
+
+        # Cosine similarity
+        similarity = F.cosine_similarity(
+            summary_repr,
+            video_repr,
+            dim=-1
+        )
+
+        return (1.0 - similarity).mean()
+
+    def total_loss(self, outputs):
         rec = self.reconstruction_loss(outputs['target'], outputs['reconstructed_features'])
         div = self.diversity_loss(outputs['fused_features'], outputs['selected_idx'])
         smooth = self.smoothness_loss(outputs['scores'])
+        rep = self.representativeness_loss(outputs['fused_features'],outputs['selected_idx'])
+        #rep = self.representativeness_loss(outputs['fused_features'], outputs['mask'])
         total = (self.config.lambda_recon * rec
                 + self.config.lambda_div * div
-                + self.config.lambda_smooth * smooth)
-        return total, {'total': total, 'reconstruction': rec, 'divergence': div,
-                    'smoothness': smooth}
+                + self.config.lambda_smooth * smooth
+                 + self.config.lambda_rep * rep
+                )
+        return total, {'total': total, 'reconstruction': rec, 'diversity_loss': div,
+                    'smoothness': smooth, 'representativeness_loss': rep
+                    }
 
-    def sparsity_loss(self, scores):
-        return torch.abs(scores.mean() - self.config.summary_rate)
 
-    def divergence_loss(self, redundancy_r_t):
-        """Encourages lower state redundancy (higher trajectory divergence)."""
-        return redundancy_r_t.mean()
+    
+    # def sparsity_loss(self, scores):
+    #     return torch.abs(scores.mean() - self.config.summary_rate)
+
+    # def divergence_loss(self, redundancy_r_t):
+    #     """Encourages lower state redundancy (higher trajectory divergence)."""
+    #     return redundancy_r_t.mean()
 
 
 
@@ -137,8 +185,10 @@ class Solver:
                 'total': 0.0,
                 'reconstruction': 0.0,
                 # 'sparsity': 0.0
-                'divergence': 0.0,
-                'smoothness': 0.0
+                # 'divergence': 0.0,
+                'smoothness': 0.0,
+                'diversity_loss': 0.0,
+                'representativeness_loss' : 0.0
             }
             # print("Train loaderrrrrrrrr", self.train_loader)
             for batch in tqdm(self.train_loader, desc='Batch', leave=False):
@@ -149,7 +199,7 @@ class Solver:
                 # print("BATCHHHHHHH", batch)
                 #outputs = self.summarizer(cnn_features, semantic_features)
                 outputs = self.summarizer(cnn_features, semantic_features)
-                total_loss, losses = self.total_loss(outputs, epoch_i)
+                total_loss, losses = self.total_loss(outputs)
                 # self.diagnose_scores(
                 #     outputs,
                 #     video_name,
@@ -192,6 +242,10 @@ class Solver:
                     print('\nEpoch:', epoch_i)
                     print('Total:', losses['total'].item())
                     print('Reconstruction:', losses['reconstruction'].item())
+                    print('Diversity:', losses['diversity_loss'].item())
+                    print('Representativeness:', losses['representativeness_loss'].item())
+                    print('Smoothness:', losses['smoothness'].item())
+
                     print(
                     f"Mean={score_mean:.4f} | "
                     f"Std={score_std:.4f} | "
@@ -206,9 +260,11 @@ class Solver:
             for key in epoch_losses:
                 print(f'{key}: {epoch_losses[key] / num_batches:.4f}')
             print('========================================================')
+            ckpt = self.save_checkpoint(epoch_i)
+            self.run_test_evaluate(epoch_i, ckpt)
 
-        self.evaluate(epoch_i)
-        self.save_checkpoint(epoch_i)
+        # self.evaluate(epoch_i)
+        # self.save_checkpoint(epoch_i)
 
     def evaluate(self, epoch_i):
         self.summarizer.eval()
@@ -232,9 +288,44 @@ class Solver:
 
         print('Saved scores to:', output_file)
 
+    def run_test_evaluate(self, epoch_i, ckpt):
+        out_dir = Path('./summe/test'); out_dir.mkdir(parents=True, exist_ok=True)
+        out_h5 = out_dir / 'result_test.h5'
+        cmd = [sys.executable, 'Test_evaluate.py',
+               '--dataset', 'summe',
+               '--cnn-h5', './datasets/summe/eccv16_dataset_summe_google_pool5.h5',
+               '--semantic-h5', './datasets/summe/eccv16_dataset_summe_siglip2.h5',
+               '--checkpoint', str(ckpt),
+               '--output', str(out_h5),
+               '--splits-file', './datasets/summe/splits/summe_splits.json',
+               '--split-index', str(self.config.split_index)]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+
+        f1 = precision = recall = 'NA'
+        try:
+            with h5py.File(out_h5, 'r') as f:
+                f1 = round(float(f.attrs['mean_fmeasure']) * 100, 2)
+                precision = round(float(f.attrs['mean_precision']) * 100, 2)
+                recall = round(float(f.attrs['mean_recall']) * 100, 2)
+        except Exception as e:
+            print(f'[eval] could not read result (returncode={proc.returncode}): {e}')
+            print('\n'.join((proc.stdout + proc.stderr).strip().splitlines()[-15:]))
+
+        csv_path = out_dir / f'epoch_f1_epoch_{self.config.n_epochs}_split_{self.config.split_index}_temporal.csv'
+        new_file = not csv_path.exists()
+        with open(csv_path, 'a', newline='') as f:
+            w = csv.writer(f)
+            if new_file:
+                w.writerow(['split', 'epoch', 'f1', 'precision', 'recall'])
+            w.writerow([self.config.split_index, epoch_i, f1, precision, recall])
+        print(f'[eval] epoch {epoch_i}: F1 = {f1}')
+
     def save_checkpoint(self, epoch_i):
         self.config.save_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_path = self.config.save_dir / f'{self.config.video_type}_epoch_{epoch_i}_newLayer_cd.pth'
+
+        checkpoint_path = self.config.save_dir / f'{self.config.video_type}_epoch_{self.config.n_epochs}_cd_wSmoothReptDivRwd_temporal.pth'
+        
+        # checkpoint_path = self.config.save_dir / f'{self.config.video_type}_epoch_{epoch_i}_newLayer_cd_wSmoothReptCvRwd.pth'
 
         torch.save({
             'epoch': epoch_i,
@@ -242,3 +333,4 @@ class Solver:
             'optimizer_state_dict': self.optimizer.state_dict()
         }, checkpoint_path)
         print('Saved checkpoint:', checkpoint_path)
+        return checkpoint_path

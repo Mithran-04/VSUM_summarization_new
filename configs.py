@@ -51,6 +51,8 @@ def get_config(parse=True, **optional_kwargs):
     # Input paths & dimensions
     parser.add_argument('--dataset_dir', type=str, required=True)
     parser.add_argument('--semantic_dataset', type=str, required=True)
+    # parser.add_argument('--semantic_dataset', required=False, default=None)
+
     parser.add_argument('--splits_file', type=str, required=True)
     # parser.add_argument('--baseline', type=str, required=True)
     parser.add_argument('--input_size', type=int, default=1024)
@@ -65,10 +67,11 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--summary_rate', type=float, default=0.15)
 
     # Loss Weights
-    parser.add_argument('--lambda_recon', type=float, default=1.0)
-    parser.add_argument('--lambda_sparse', type=float, default=5.0)
+    parser.add_argument('--lambda_recon', type=float, default=1.5)
+    # parser.add_argument('--lambda_sparse', type=float, default=5.0)
     parser.add_argument('--lambda_div', type=float, default=0.1)
     parser.add_argument('--lambda_smooth', type=float, default=0.05)
+    parser.add_argument('--lambda_rep', type=float, default=1.0)
 
     # Training & Warmup
     parser.add_argument('--warmup_epochs', type=int, default=5)
