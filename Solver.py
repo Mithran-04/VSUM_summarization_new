@@ -407,16 +407,30 @@ class Solver:
         print('Saved scores to:', output_file)
 
     def run_test_evaluate(self, epoch_i, ckpt):
-        out_dir = Path('./summe/test'); out_dir.mkdir(parents=True, exist_ok=True)
+        #Summe
+        # out_dir = Path('./summe/test'); out_dir.mkdir(parents=True, exist_ok=True)
+        # out_h5 = out_dir / 'result_test.h5'
+        # cmd = [sys.executable, 'Test_evaluate.py',
+        #        '--dataset', 'summe',
+        #        '--cnn-h5', './datasets/summe/eccv16_dataset_summe_google_pool5.h5',
+        #        '--semantic-h5', './datasets/summe/eccv16_dataset_summe_siglip2.h5',
+        #        '--checkpoint', str(ckpt),
+        #        '--output', str(out_h5),
+        #        '--splits-file', './datasets/summe/splits/summe_splits.json',
+        #        '--split-index', str(self.config.split_index)]
+
+        #TVSum
+        out_dir = Path('./tvsum/test'); out_dir.mkdir(parents=True, exist_ok=True)
         out_h5 = out_dir / 'result_test.h5'
         cmd = [sys.executable, 'Test_evaluate.py',
-               '--dataset', 'summe',
-               '--cnn-h5', './datasets/summe/eccv16_dataset_summe_google_pool5.h5',
-               '--semantic-h5', './datasets/summe/eccv16_dataset_summe_siglip2.h5',
-               '--checkpoint', str(ckpt),
-               '--output', str(out_h5),
-               '--splits-file', './datasets/summe/splits/summe_splits.json',
-               '--split-index', str(self.config.split_index)]
+                '--dataset', 'tvsum',
+                '--cnn-h5', './datasets/tvsum/eccv16_dataset_tvsum_google_pool5_with_names.h5',
+                '--semantic-h5', './datasets/tvsum/eccv16_dataset_tvsum_siglip2.h5',
+                '--checkpoint', str(ckpt),
+                '--output', str(out_h5),
+                '--splits-file', './datasets/tvsum/splits/tvsum_splits.json',
+                '--split-index', str(self.config.split_index)]
+
         proc = subprocess.run(cmd, capture_output=True, text=True)
 
         f1 = precision = recall = 'NA'
