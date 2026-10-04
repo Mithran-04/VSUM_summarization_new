@@ -162,7 +162,7 @@ def evaluate_dataset(
 
             with torch.no_grad():
                 output = model(cnn_tensor, semantic_tensor)
-                output = model(cnn_tensor, cnn_tensor)
+                # output = model(cnn_tensor, cnn_tensor)
                 scores = extract_model_scores(output)
                 scores = scores.detach().cpu().numpy().reshape(-1)
 

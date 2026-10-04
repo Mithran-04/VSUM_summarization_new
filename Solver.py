@@ -13,13 +13,37 @@ import subprocess
 import sys
 from pathlib import Path
 import h5py
-
+import shutil
 
 class Solver:
     def __init__(self, config, train_loader, test_loader):
         self.config = config
         self.train_loader = train_loader
         self.test_loader = test_loader
+
+        # Previous epoch's Top-K selections, indexed by video name
+        self.previous_selected = None
+        self.best_f1 = -1.0
+        self.best_epoch = None
+
+        # Training metrics CSV
+        self.metrics_csv = (self.config.save_dir /f'{self.config.video_type}_training_metrics_split_{self.config.split_index}_v3_1.csv')
+        self.config.save_dir.mkdir(parents=True, exist_ok=True)
+        if not self.metrics_csv.exists():
+            with open(self.metrics_csv, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'split',
+                    'epoch',
+                    'total_loss',
+                    'reconstruction_loss',
+                    'diversity_loss',
+                    'representativeness_loss',
+                    'smoothness_loss',
+                    'topk_jaccard'
+                ])
+
+
 
     def build(self):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -178,6 +202,34 @@ class Solver:
 
         print("============================================\n")
 
+
+    def selection_jaccard(self, current_selected, previous_selected):
+        """
+        Compute mean Top-K Jaccard similarity between consecutive epochs.
+
+        current_selected / previous_selected:
+            dict mapping video_name -> selected frame indices
+        """
+
+        values = []
+        common_videos = (set(current_selected.keys()) & set(previous_selected.keys()))
+
+        for video_name in common_videos:
+            current_set = set(current_selected[video_name])
+            previous_set = set(previous_selected[video_name])
+            union = current_set | previous_set
+            intersection = current_set & previous_set
+
+            if len(union) == 0:
+                values.append(1.0)
+            else:
+                values.append(len(intersection) / len(union))
+
+        if not values:
+            return float('nan')
+        return sum(values) / len(values)
+    
+
     def train(self):
         for epoch_i in trange(self.config.n_epochs, desc='Epoch'):
             self.summarizer.train()
@@ -190,15 +242,26 @@ class Solver:
                 'diversity_loss': 0.0,
                 'representativeness_loss' : 0.0
             }
+
+            epoch_selected = {}
+
             # print("Train loaderrrrrrrrr", self.train_loader)
             for batch in tqdm(self.train_loader, desc='Batch', leave=False):
                 cnn_features = batch[0].to(self.device)
                 semantic_features = batch[1].to(self.device)
                 video_name = batch[2][0]
-                # print(f"\nProcessing video: {video_name}")
+                print(f"\nProcessing video: {video_name}")
                 # print("BATCHHHHHHH", batch)
-                #outputs = self.summarizer(cnn_features, semantic_features)
                 outputs = self.summarizer(cnn_features, semantic_features)
+                
+                selected_idx = outputs['selected_idx']
+                epoch_selected[video_name] = (
+                    selected_idx[0]
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
+
                 total_loss, losses = self.total_loss(outputs)
                 # self.diagnose_scores(
                 #     outputs,
@@ -214,6 +277,18 @@ class Solver:
                 print("Totall losssss", total_loss)
                 self.optimizer.zero_grad()
                 total_loss.backward()
+
+                # --- gradient norm logging (before clipping) ---
+                def grad_norm(params):
+                    return sum(p.grad.norm() ** 2 for p in params if p.grad is not None) ** 0.5
+
+                g_scorer = grad_norm(self.summarizer.interceptor_scorer.parameters())
+                g_decoder = grad_norm(self.summarizer.decoder.parameters())
+                g_encoder = grad_norm(self.summarizer.mamba_encoder.parameters())
+                if self.config.verbose:
+                    print(f"GradNorm | scorer={float(g_scorer):.2e} | "
+                          f"encoder={float(g_encoder):.2e} | decoder={float(g_decoder):.2e}")
+                # -----------------------------------------------
 
                 torch.nn.utils.clip_grad_norm_(
                     self.summarizer.parameters(), self.config.clip
@@ -255,10 +330,53 @@ class Solver:
                     f">0.5={fraction_above_05:.4f}"
                     )
 
+            #OLDDDDDDDDDDDDDDDDD
+            # num_batches = max(1, len(self.train_loader))
+            # print(f'\n================ Epoch {epoch_i} Completed ================')
+            # for key in epoch_losses:
+            #     print(f'{key}: {epoch_losses[key] / num_batches:.4f}')
+            # print('========================================================')
+            # ckpt = self.save_checkpoint(epoch_i)
+            # self.run_test_evaluate(epoch_i, ckpt)
+            #OLDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
+
             num_batches = max(1, len(self.train_loader))
+            # Average epoch losses
+            avg_losses = {
+                key: epoch_losses[key] / num_batches
+                for key in epoch_losses
+            }
+
+            # Top-K Jaccard against previous epoch
+            if self.previous_selected is None:
+                topk_jaccard = float('nan')
+            else:
+                topk_jaccard = self.selection_jaccard(epoch_selected,self.previous_selected)
+            # Store current selections for next epoch
+            self.previous_selected = {
+                video_name: indices.copy()
+                for video_name, indices in epoch_selected.items()
+            }
+
+            # Save losses + Top-K Jaccard
+            with open(self.metrics_csv, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    self.config.split_index,
+                    epoch_i,
+                    avg_losses['total'],
+                    avg_losses['reconstruction'],
+                    avg_losses['diversity_loss'],
+                    avg_losses['representativeness_loss'],
+                    avg_losses['smoothness'],
+                    topk_jaccard
+                ])
+
             print(f'\n================ Epoch {epoch_i} Completed ================')
-            for key in epoch_losses:
-                print(f'{key}: {epoch_losses[key] / num_batches:.4f}')
+
+            for key in avg_losses:
+                print(f'{key}: {avg_losses[key]:.4f}')
+
             print('========================================================')
             ckpt = self.save_checkpoint(epoch_i)
             self.run_test_evaluate(epoch_i, ckpt)
@@ -311,7 +429,7 @@ class Solver:
             print(f'[eval] could not read result (returncode={proc.returncode}): {e}')
             print('\n'.join((proc.stdout + proc.stderr).strip().splitlines()[-15:]))
 
-        csv_path = out_dir / f'epoch_f1_epoch_{self.config.n_epochs}_split_{self.config.split_index}_temporal.csv'
+        csv_path = out_dir / f'epoch_f1_epoch_{self.config.n_epochs}_split_{self.config.split_index}_temporal_wgt_updt_ver3_topk.csv'
         new_file = not csv_path.exists()
         with open(csv_path, 'a', newline='') as f:
             w = csv.writer(f)
@@ -319,11 +437,17 @@ class Solver:
                 w.writerow(['split', 'epoch', 'f1', 'precision', 'recall'])
             w.writerow([self.config.split_index, epoch_i, f1, precision, recall])
         print(f'[eval] epoch {epoch_i}: F1 = {f1}')
+        # Save a separate copy of the best checkpoint (only after epoch 10)
+        if isinstance(f1, (int, float)) and epoch_i > 10 and f1 > self.best_f1:
+            self.best_f1, self.best_epoch = f1, epoch_i
+            best_path = Path(ckpt).with_name(Path(ckpt).stem + '_best_f1.pth')
+            shutil.copyfile(ckpt, best_path)
+            print(f'[eval] new best F1 = {f1} at epoch {epoch_i} -> {best_path}')
 
     def save_checkpoint(self, epoch_i):
         self.config.save_dir.mkdir(parents=True, exist_ok=True)
 
-        checkpoint_path = self.config.save_dir / f'{self.config.video_type}_epoch_{self.config.n_epochs}_cd_wSmoothReptDivRwd_temporal.pth'
+        checkpoint_path = self.config.save_dir / f'{self.config.video_type}_epoch_{self.config.n_epochs}_cd_wSmoothReptDivRwd_temporal_wgt_updt_ver3_topk.pth'
         
         # checkpoint_path = self.config.save_dir / f'{self.config.video_type}_epoch_{epoch_i}_newLayer_cd_wSmoothReptCvRwd.pth'
 

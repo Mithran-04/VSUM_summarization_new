@@ -181,8 +181,13 @@ class DualParameterInterceptorScorer(nn.Module):
             nn.Linear(2, 16), nn.SiLU(), nn.Linear(16, 1))    
 
         
+        # self.fusion = nn.Sequential(
+        #     nn.Linear(2, 16), nn.SiLU(), nn.Linear(16, 1))
         self.fusion = nn.Sequential(
-            nn.Linear(2, 16), nn.SiLU(), nn.Linear(16, 1))
+            nn.Linear(3, 16), nn.SiLU(), nn.Linear(16, 1))
+
+        # self.cue_w = nn.Parameter(torch.tensor(1.0))
+        
         self.scale = nn.Parameter(torch.tensor(2.0))
         self.bias = nn.Parameter(torch.tensor(math.log(summary_rate / (1 - summary_rate))))
 
@@ -230,6 +235,8 @@ class DualParameterInterceptorScorer(nn.Module):
 
         # Fuse the z-scored signals directly (no stacked sigmoids)
         logit = self.fusion(torch.cat([delta_hat, state_hat, content_hat], dim=-1))
+        # glob = cues[..., 0:1]
+        # logit = self.fusion(torch.cat([delta_hat, state_hat, content_hat], dim=-1)) + self.cue_w * glob
         z = self._zscore(logit)
         scores = torch.sigmoid(self.scale * z + self.bias)                       # [B,T,1]
         return scores, delta_score, state_score, delta_t, d_t
