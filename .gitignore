@@ -1,6 +1,18 @@
 __pycache__/
 *.pyc
-summe/
-*.h5
+
 data/
-tvsum/
+
+# Ignore the parent folders that are not part of the repo's dataset storage
+/summe/
+/tvsum/
+
+# Keep only the dataset folders under datasets/
+!/datasets/
+!/datasets/summe/
+!/datasets/summe/**
+!/datasets/tvsum/
+!/datasets/tvsum/**
+
+# Ignore raw .h5 files everywhere except the dataset folders above
+*.h5
