@@ -2,18 +2,24 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 from Attention import (
     CNNProjection,
     SemanticProjection,
     CrossModalFusion,
     BiMambaSSM,
-    DualParameterInterceptorScorer
+    FSSAScorer
 )
 from layers.decoder import MambaStateSpaceDecoder
 
-import torch.nn.functional as F
 
 class Summarizer(nn.Module):
+    """
+    features -> projections -> fusion -> BiMamba encoder -> score head (h_t)
+    S_t = alpha * cos(X_t, T_t) + (1 - alpha) * h_t
+    soft re-weighting by S_t -> Mamba decoder -> reconstructed (X, T)
+    """
     def __init__(self, cnn_size=1024, semantic_size=768, hidden_size=512,
                  d_state=16, dropout=0.1, summary_rate=0.15):
         super().__init__()
@@ -22,13 +28,10 @@ class Summarizer(nn.Module):
         self.semantic_projection = SemanticProjection(semantic_size, hidden_size, dropout)
         self.cross_modal_fusion = CrossModalFusion(hidden_size, dropout)
         self.mamba_encoder = BiMambaSSM(d_model=hidden_size, d_state=d_state)
-        self.interceptor_scorer = DualParameterInterceptorScorer(
-            d_inner=hidden_size * 2, d_state=d_state, summary_rate=summary_rate,  d_model=hidden_size)
+        self.scorer = FSSAScorer(d_model=hidden_size, summary_rate=summary_rate)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, hidden_size))
         self.decoder = MambaStateSpaceDecoder(hidden_size, d_state,
                                               out_size=cnn_size + semantic_size)
-        # self.decoder = MambaStateSpaceDecoder(hidden_size, d_state,
-        #                                               out_size=cnn_size)
 
     def forward(self, cnn_features, semantic_features):
         if cnn_features.ndim == 2:
@@ -36,32 +39,31 @@ class Summarizer(nn.Module):
 
         cnn_proj = self.cnn_projection(cnn_features)
         sem_proj = self.semantic_projection(semantic_features)
-        fused = self.cross_modal_fusion(cnn_proj, sem_proj)                      # [B,T,512]
-        # fused = cnn_proj
+        fused = self.cross_modal_fusion(cnn_proj, sem_proj)                  # [B,T,D]
 
-        temporal, d_fw, d_bw, h_fw, h_bw = self.mamba_encoder(fused)
-        scores, delta_score, state_score, delta_t, d_t = self.interceptor_scorer(
-            d_fw, d_bw, h_fw, h_bw, temporal)
+        temporal, *_ = self.mamba_encoder(fused)                             # [B,T,D]
 
-        # Hard top-k with straight-through gradient
-        B, T, _ = scores.shape
-        k = max(1, int(round(T * self.summary_rate)))
-        idx = scores.squeeze(-1).topk(k, dim=1).indices                          # [B,k]
-        hard = torch.zeros_like(scores).scatter_(1, idx.unsqueeze(-1), 1.0)
-        mask = hard + scores - scores.detach()
+        # Cross-modal cosine in the shared projected space (detached: acts as a stable prior),
+        # min-max normalised per video so it lives in [0, 1] like h_t.
+        cos = F.cosine_similarity(cnn_proj.detach(), sem_proj.detach(), dim=-1).unsqueeze(-1)
+        cos_min = cos.amin(dim=1, keepdim=True)
+        cos_max = cos.amax(dim=1, keepdim=True)
+        cos = (cos - cos_min) / (cos_max - cos_min + 1e-6)
 
-        # The decoder sees only selected frames' own features (no neighbor leakage)
-        dec_in = fused * mask + self.mask_token * (1 - mask)
-        recon = self.decoder(dec_in)                                             # [B,T,1792]
+        scores, h_t, alpha = self.scorer(temporal, cos)                      # [B,T,1]
 
-        # Fixed target: normalized raw inputs
-        # target = torch.cat([F.normalize(cnn_features, dim=-1),
-        #                     F.normalize(semantic_features, dim=-1)], dim=-1)
+        # Soft re-weighting (no hard top-k in the training path).
+        # For the exact paper form use:  dec_in = fused * scores
+        dec_in = fused * scores + self.mask_token * (1 - scores)
+        recon = self.decoder(dec_in)                                         # [B,T,cnn+sem]
+
         target = torch.cat([F.normalize(cnn_features, dim=-1),
-                                 F.normalize(semantic_features, dim=-1)
-                                 ],dim=-1)
+                            F.normalize(semantic_features, dim=-1)], dim=-1)
 
-        return {'scores': scores, 'delta_score': delta_score, 'state_score': state_score,
-                'delta_t': delta_t, 'd_t': d_t, 'fused_features': fused,
-                'temporal_features': temporal, 'selected_idx': idx,
-                'reconstructed_features': recon, 'mask': mask, 'target': target}
+        return {
+            'scores': scores,
+            'h_t': h_t,
+            'alpha': alpha,
+            'reconstructed_features': recon,
+            'target': target
+        }

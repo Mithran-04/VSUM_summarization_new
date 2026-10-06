@@ -67,11 +67,11 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--summary_rate', type=float, default=0.15)
 
     # Loss Weights
-    parser.add_argument('--lambda_recon', type=float, default=2.0)
-    # parser.add_argument('--lambda_sparse', type=float, default=5.0)
-    parser.add_argument('--lambda_div', type=float, default=0.5)
-    parser.add_argument('--lambda_smooth', type=float, default=0.05)
-    parser.add_argument('--lambda_rep', type=float, default=0.5)
+    parser.add_argument('--lambda_recon', type=float, default=1)
+    parser.add_argument('--lambda_sparse', type=float, default=1.0)
+    parser.add_argument('--lambda_div', type=float, default=1.0)      # unused in the new Solver
+    parser.add_argument('--lambda_smooth', type=float, default=0.01)  # unused in the new Solver
+    parser.add_argument('--lambda_rep', type=float, default=1.0)      # unused in the new Solver
 
     # Training & Warmup
     parser.add_argument('--warmup_epochs', type=int, default=5)
