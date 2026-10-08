@@ -57,8 +57,8 @@ class Summarizer(nn.Module):
         s_min = scores.amin(dim=1, keepdim=True)
         s_max = scores.amax(dim=1, keepdim=True)
         w = (scores - s_min) / (s_max - s_min + 1e-6)
-        # dec_in = fused * w + self.mask_token * (1 - w)
-        dec_in = fused * scores + self.mask_token * (1 - scores)
+        dec_in = fused * w + self.mask_token * (1 - w)
+        # dec_in = fused * scores + self.mask_token * (1 - scores)
         recon = self.decoder(dec_in)                                         # [B,T,cnn+sem]
 
         target = torch.cat([F.normalize(cnn_features, dim=-1),
