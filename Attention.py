@@ -160,7 +160,8 @@ class FSSAScorer(nn.Module):
     def forward(self, temporal, cos_sim):
         h_t = torch.sigmoid(self.head(temporal) + self.bias)       # [B,T,1]
         alpha = torch.sigmoid(self.alpha_logit)
-        scores = alpha * cos_sim + (1 - alpha) * h_t               # [B,T,1]
+        # scores = alpha * cos_sim + (1 - alpha) * h_t               # [B,T,1]
+        scores = h_t               # [B,T,1]
         return scores, h_t, alpha
 
 

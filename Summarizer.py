@@ -54,6 +54,10 @@ class Summarizer(nn.Module):
 
         # Soft re-weighting (no hard top-k in the training path).
         # For the exact paper form use:  dec_in = fused * scores
+        s_min = scores.amin(dim=1, keepdim=True)
+        s_max = scores.amax(dim=1, keepdim=True)
+        w = (scores - s_min) / (s_max - s_min + 1e-6)
+        # dec_in = fused * w + self.mask_token * (1 - w)
         dec_in = fused * scores + self.mask_token * (1 - scores)
         recon = self.decoder(dec_in)                                         # [B,T,cnn+sem]
 
@@ -62,6 +66,7 @@ class Summarizer(nn.Module):
 
         return {
             'scores': scores,
+            'weights': w, 
             'h_t': h_t,
             'alpha': alpha,
             'reconstructed_features': recon,

@@ -19,8 +19,8 @@ from Attention import FeatureDiscriminator
 # ---------------------------------------------------------------------------
 # Run settings
 # ---------------------------------------------------------------------------
-EVAL_DATASET = 'tvsum'          # 'summe' or 'tvsum'
-RUN_TAG = 'fssa_mamba_adv_v1'   # appears in checkpoint / csv names so old runs are not overwritten
+EVAL_DATASET = 'summe'          # 'summe' or 'tvsum'
+RUN_TAG = 'fssa_mamba_adv_v1_discriminator'   # appears in checkpoint / csv names so old runs are not overwritten
 
 EVAL_PATHS = {
     'summe': {
@@ -262,7 +262,7 @@ class Solver:
                 results[video_name] = outputs['scores'].squeeze(-1)[0].cpu().numpy().tolist()
 
         self.config.score_dir.mkdir(parents=True, exist_ok=True)
-        output_file = self.config.score_dir / f'{self.config.video_type}_{RUN_TAG}_epoch_{epoch_i}.json'
+        output_file = self.config.score_dir / f'{self.config.video_type}_{RUN_TAG}_epoch_{epoch_i}_discriminator.json'
         with open(output_file, 'w') as f:
             json.dump(results, f)
         print('Saved scores to:', output_file)
@@ -308,7 +308,7 @@ class Solver:
         # prefer a fixed epoch count or a held-out validation split.
         if isinstance(f1, (int, float)) and f1 > self.best_f1:
             self.best_f1, self.best_epoch = f1, epoch_i
-            best_path = Path(ckpt).with_name(Path(ckpt).stem + '_best_f1.pth')
+            best_path = Path(ckpt).with_name(Path(ckpt).stem + f'{self.config.video_type}_best_f1_discriminator.pth')
             shutil.copyfile(ckpt, best_path)
             print(f'[eval] new best F1 = {f1} at epoch {epoch_i} -> {best_path}')
 
@@ -316,7 +316,7 @@ class Solver:
     def save_checkpoint(self, epoch_i):
         self.config.save_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_path = self.config.save_dir / (
-            f'{self.config.video_type}_{RUN_TAG}_split_{self.config.split_index}.pth')
+            f'{self.config.video_type}_{RUN_TAG}_split_{self.config.split_index}_discriminator.pth')
 
         torch.save({
             'epoch': epoch_i,

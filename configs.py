@@ -80,6 +80,7 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--weight_decay', type=float, default=1e-5)
     parser.add_argument('--clip', type=float, default=5.0)
     parser.add_argument('--lr_scorer', type=float, default=1e-3)
+    parser.add_argument('--seed', type=int, default=0)
     
 
     if parse:
